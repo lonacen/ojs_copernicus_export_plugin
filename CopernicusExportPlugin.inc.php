@@ -13,8 +13,6 @@
  */
 
 import('lib.pkp.classes.plugins.ImportExportPlugin');
-import('lib.pkp.classes.xml.XMLCustomWriter');
-
 
 class CopernicusExportPlugin extends ImportExportPlugin
 {
@@ -67,9 +65,26 @@ class CopernicusExportPlugin extends ImportExportPlugin
         return __('plugins.importexport.copernicus.description');
     }
 
+    function createNode(&$document, &$parent, $name, $attributes = [], $content = ''): DOMElement
+    {
+        $node = $document->createElement($name);
+        $parent->appendChild($node);
+
+        if (is_array($attributes)) {
+            foreach ($attributes as $attribute => $value) {
+                $node->setAttribute($attribute, $value);
+            }
+        }
+
+        $node->textContent = $content;
+
+        return $node;
+    }
+
     function formatDate($date)
     {
-        if ($date == '') return null;
+        if ($date == '')
+            return null;
         return date('Y-m-d', strtotime($date));
     }
 
@@ -81,279 +96,408 @@ class CopernicusExportPlugin extends ImportExportPlugin
         return $launch;
     }
 
-    function formatXml($simpleXMLElement)
+    function &generateIssueDom(&$journal, &$issue)
     {
-        $xmlDocument = new DOMDocument('1.0');
-        $xmlDocument->preserveWhiteSpace = false;
-        $xmlDocument->formatOutput = true;
-        $xmlDocument->loadXML($simpleXMLElement->saveXML());
+        $journalId = $journal->getId();
+        $journalIssn = $journal->getSetting('printIssn');
+        $journalIssn = $journalIssn ? $journalIssn : $journal->getSetting('onlineIssn');
 
-        return $xmlDocument->saveXML();
-    }
+        $issueId = $issue->getId();
+        $issueNumber = $issue->getNumber();
+        $issueVolume = $issue->getVolume();
+        $issueYear = $issue->getYear();
+        $issuePublishedDate = DateTime::createFromFormat('Y-m-d H:i:s', $issue->getDatePublished())->format('Y-m-d');
 
-    function &generateIssueDom(&$doc, &$journal, &$issue)
-    {
-        $issn = $journal->getSetting('printIssn');
-        $issn = $issn ? $issn : $journal->getSetting('onlineIssn');
+        $coverImageUrl = "";
+        $coverImages = $issue->getData('coverImage');
+        foreach ($coverImages as $coverImage) {
+            if(empty($coverImage)) {
+                continue;
+            }
+            $request = Application::get()->getRequest();
 
-        $root =& XMLCustomWriter::createElement($doc, 'ici-import');
-        XMLCustomWriter::setAttribute($root, "xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance");
-        XMLCustomWriter::setAttribute($root, "xsi:noNamespaceSchemaLocation", "https://journals.indexcopernicus.com/ic-import.xsd");
+	    	import('classes.file.PublicFileManager');
+		    $publicFileManager = new PublicFileManager();
 
+		    $coverImageUrl = $request->getBaseUrl() . '/' . $publicFileManager->getContextFilesPath($journalId) . '/' . $coverImage;
+            break;
+        }
 
-        $journal_elem = XMLCustomWriter::createChildWithText($doc, $root, 'journal', '', true);
-        XMLCustomWriter::setAttribute($journal_elem, 'issn', $issn);
+        $document = new DOMDocument('1.0', 'utf-8');
 
-        $issue_elem = XMLCustomWriter::createChildWithText($doc, $root, 'issue', '', true);
+        $rootNode = $this->createNode(
+            $document,
+            $document,
+            'ici-import'
+        );
 
-        $pub_issue_date = $issue->getDatePublished() ? str_replace(' ', "T", $issue->getDatePublished()) . 'Z' : '';
+        $journalNode = $this->createNode(
+            $document,
+            $rootNode,
+            'journal',
+            [
+                "issn" => $journalIssn
+            ]
+        );
 
+        $issueNodeAttributes = [
+            "number" => $issueNumber,
+            "volume" => $issueVolume,
+            "year" => $issueYear,
+            "publicationDate" => $issuePublishedDate
+        ];
 
-        XMLCustomWriter::setAttribute($issue_elem, 'number', $issue->getNumber());
-        XMLCustomWriter::setAttribute($issue_elem, 'volume', $issue->getVolume());
-        XMLCustomWriter::setAttribute($issue_elem, 'year', $issue->getYear());
-        XMLCustomWriter::setAttribute($issue_elem, 'publicationDate', $pub_issue_date, false);
+        if(!empty($coverImageUrl)) {
+            $issueNodeAttributes["coverUrl"] = $coverImageUrl;
+            $issueNodeAttributes["coverDate"] = $issuePublishedDate;
+        }
+
+        $issueNode = $this->createNode(
+            $document,
+            $rootNode,
+            'issue',
+            $issueNodeAttributes
+        );
 
         $sectionDao =& DAORegistry::getDAO('SectionDAO');
+        $submissionKeywordDao =& DAORegistry::getDAO('SubmissionKeywordDAO');
 
+        $articlesCount = 0;
 
-        $articleFileDao =& DAORegistry::getDAO('ArticleGalleyDAO');
-        $submissionKeywordDao = DAORegistry::getDAO('SubmissionKeywordDAO');
-        $num_articles = 0;
+        $issueSubmissions = iterator_to_array(Services::get('submission')->getMany([
+            'contextId' => $journalId,
+            'issueIds' => [$issueId],
+            'status' => STATUS_PUBLISHED,
+            'orderBy' => 'seq',
+            'orderDirection' => 'ASC',
+        ]));
 
-        foreach ($sectionDao->getByIssueId($issue->getId()) as $section) {
-            #import('classes.submission.Submission'); // import STATUS_ constants
-            $issueSubmissions = iterator_to_array(Services::get('submission')->getMany([
-                'contextId' => $journal->getId(),
-                'issueIds' => [$issue->getId()],
-                'status' => STATUS_PUBLISHED,
-                'orderBy' => 'seq',
-                'orderDirection' => 'ASC',
-            ]));
+        foreach ($issueSubmissions as $article) {
+            $publication = $article->getCurrentPublication();
 
-            $sections = Application::get()->getSectionDao()->getByIssueId($issue->getId());
-            $issueSubmissionsInSection = [];
-            foreach ($sections as $section) {
-                $issueSubmissionsInSection[$section->getId()] = [
-                    'title' => $section->getLocalizedTitle(),
-                    'articles' => [],
-                ];
+            $title = $publication->getData('title');
+            if (!$title) {
+                continue;
             }
-            foreach ($issueSubmissions as $submission) {
-                if (!$sectionId = $submission->getCurrentPublication()->getData('sectionId')) {
-                    continue;
+
+            $locales = array_keys(PKPLocale::getSupportedFormLocales());
+
+            $articleNode = $this->createNode(
+                $document,
+                $issueNode,
+                'article'
+            );
+
+            $typeNode = $this->createNode(
+                $document,
+                $articleNode,
+                'type',
+                [],
+                'ORIGINAL_ARTICLE'
+            );
+
+            foreach ($locales as $locale) {
+                $iso1Locale = PKPLocale::getIso1FromLocale($locale);
+
+                $languageVersionNode = $this->createNode(
+                    $document,
+                    $articleNode,
+                    'languageVersion',
+                    [
+                        "language" => $iso1Locale
+                    ]
+                );
+
+                $titleNode = $this->createNode(
+                    $document,
+                    $languageVersionNode,
+                    'title',
+                    [],
+                    $publication->getLocalizedTitle($locale)
+                );
+
+                $abstractNode = $this->createNode(
+                    $document,
+                    $languageVersionNode,
+                    'abstract',
+                    [],
+                    strip_tags($publication->getLocalizedData('abstract', $locale))
+                );
+
+                $url = "";
+                foreach ($publication->getData('galleys') as $galley) {
+                    if (!$galley->getRemoteURL() && $galley->isPdfGalley()) {
+                        $request = Application::get()->getRequest();
+                        $url = $request->url($journal->getPath(), "article", "download", array($article->getBestId(), $galley->getBestGalleyId()), null, null, true);
+                    }
+                    break;
                 }
-                $issueSubmissionsInSection[$sectionId]['articles'][] = $submission;
+
+                $pdfFileUrlNode = $this->createNode(
+                    $document,
+                    $languageVersionNode,
+                    'pdfFileUrl',
+                    [],
+                    $url
+                );
+
+
+                $articlePublicationDate = DateTime::createFromFormat('Y-m-d', $article->getDatePublished())->format('Y-m-d');
+
+                $publicationDateNode = $this->createNode(
+                    $document,
+                    $languageVersionNode,
+                    'publicationDate',
+                    [],
+                    $articlePublicationDate
+                );
+
+                $pageFromNode = $this->createNode(
+                    $document,
+                    $languageVersionNode,
+                    'pageFrom',
+                    [],
+                    $publication->getStartingPage()
+                );
+
+                $pageToNode = $this->createNode(
+                    $document,
+                    $languageVersionNode,
+                    'pageTo',
+                    [],
+                    $publication->getEndingPage()
+                );
+
+                $doiNode = $this->createNode(
+                    $document,
+                    $languageVersionNode,
+                    'doi',
+                    [],
+                    $publication->getStoredPubId('doi')
+                );
+
+                $keywordsNode = $this->createNode(
+                    $document,
+                    $languageVersionNode,
+                    'keywords',
+                );
+
+                $keywords = $submissionKeywordDao->getKeywords($publication->getId(), array($locale));
+                if ($keywords)
+                    $keywords = $keywords[$locale];
+                $j = 0;
+                foreach ($keywords as $keyword) {
+                    $keywordNode = $this->createNode(
+                        $document,
+                        $keywordsNode,
+                        'keyword',
+                        [],
+                        $keyword
+                    );
+                    $j++;
+                }
+
+                if ($j == 0) {
+                    $keywordNode = $this->createNode(
+                        $document,
+                        $keywordsNode,
+                        'keyword'
+                    );
+                }
             }
-            #var_dump($sumbission_array);
 
-            foreach ($issueSubmissionsInSection as $sections) {
-                foreach ($sections['articles'] as $_article) {
+            $authorsNode = $this->createNode(
+                $document,
+                $articleNode,
+                'authors'
+            );
 
-                    $article = $_article->getCurrentPublication();
-                    $title = $article->getData('title');
-                    if (!$title)
+            $authorsCount = 1;
+            $authorsLocale = PKPLocale::getLocalePrecedence();
+            foreach ($publication->getData('authors') as $author) {
+
+                $authorNode = $this->createNode(
+                    $document,
+                    $authorsNode,
+                    'author'
+                );
+
+                $familyNames = $author->getFamilyName(null);
+                $givenNames = $author->getGivenName(null);
+
+                $authorGivenName = htmlspecialchars($givenNames[$authorsLocale[0]], ENT_COMPAT, 'UTF-8');
+                $authorSurname = htmlspecialchars($familyNames[$authorsLocale[0]], ENT_COMPAT, 'UTF-8');
+
+                $authorNameNode = $this->createNode(
+                    $document,
+                    $authorNode,
+                    'name',
+                    [],
+                    $authorGivenName
+                );
+
+                $authorSurnameNode = $this->createNode(
+                    $document,
+                    $authorNode,
+                    'surname',
+                    [],
+                    $authorSurname
+                );
+
+                $authorEmailNode = $this->createNode(
+                    $document,
+                    $authorNode,
+                    'email',
+                    [],
+                    $author->getEmail()
+                );
+
+                $authorOrderNode = $this->createNode(
+                    $document,
+                    $authorNode,
+                    'order',
+                    [],
+                    $authorsCount
+                );
+
+                $authorInstituteAffiliationNode = $this->createNode(
+                    $document,
+                    $authorNode,
+                    'instituteAffiliation',
+                    [],
+                    substr($author->getLocalizedAffiliation(), 0, 250)
+                );
+
+                $authorRoleNode = $this->createNode(
+                    $document,
+                    $authorNode,
+                    'role',
+                    [],
+                    'AUTHOR'
+                );
+
+                $authorORCIDNode = $this->createNode(
+                    $document,
+                    $authorNode,
+                    'ORCID',
+                    [],
+                    $author->getData('orcid')
+                );
+
+                $authorsCount++;
+            }
+
+            if (method_exists($article, "getLocalizedCitations")) {
+                $citationText = $article->getLocalizedCitations();
+            } else {
+                $citationText = $article->getCitations();
+            }
+
+            if ($citationText) {
+                $citationParts = explode("\n", $citationText);
+
+                $referencesNode = $this->createNode(
+                    $document,
+                    $articleNode,
+                    'references'
+                );
+
+                $citationsCount = 1;
+                foreach ($citationParts as $citation) {
+                    if (empty(trim($citation))) {
                         continue;
-                    $locales = array_keys($title);
-                    $article_elem = XMLCustomWriter::createChildWithText($doc, $issue_elem, 'article', '', true);
-                    XMLCustomWriter::createChildWithText($doc, $article_elem, 'type', 'ORIGINAL_ARTICLE');
-                    foreach ($locales as $loc) {
-                        $lc = explode('_', $loc);
-                        $lang_version = XMLCustomWriter::createChildWithText($doc, $article_elem, 'languageVersion', '', true);
-                        XMLCustomWriter::setAttribute($lang_version, 'language', $lc[0]);
-                        XMLCustomWriter::createChildWithText($doc, $lang_version, 'title', $article->getLocalizedTitle($loc), true);
-                        XMLCustomWriter::createChildWithText($doc, $lang_version, 'abstract', strip_tags($article->getLocalizedData('abstract', $loc)), true);
-
-
-                        if (is_a($article, 'PublishedArticle')) {
-                            foreach ($article->getGalleys() as $galley) {
-                                $url = Request::url($journal->getPath()) . '/article/download/' . $article->getBestArticleId() . '/' . $galley->getBestGalleyId();
-                                break;
-                            }
-                            XMLCustomWriter::createChildWithText($doc, $lang_version, 'pdfFileUrl', $url, true);
-                        }
-
-                        $publicationDate = $_article->getDatePublished() . 'T00:00:00Z';
-
-                        XMLCustomWriter::createChildWithText($doc, $lang_version, 'publicationDate', $publicationDate, false);
-                        XMLCustomWriter::createChildWithText($doc, $lang_version, 'pageFrom', $article->getStartingPage(), true);
-                        XMLCustomWriter::createChildWithText($doc, $lang_version, 'pageTo', $article->getEndingPage(), true);
-                        XMLCustomWriter::createChildWithText($doc, $lang_version, 'doi', $article->getStoredPubId('doi'), true);
-
-                        $keywords = XMLCustomWriter::createChildWithText($doc, $lang_version, 'keywords', '', true);
-
-                        $kwds = $submissionKeywordDao->getKeywords($_article->getId(), array($loc));
-                        if ($kwds)
-                            $kwds = $kwds[$loc];
-                        $j = 0;
-                        foreach ($kwds as $k) {
-                            XMLCustomWriter::createChildWithText($doc, $keywords, 'keyword', $k, true);
-                            $j++;
-                        }
-                        if ($j == 0) {
-                            XMLCustomWriter::createChildWithText($doc, $keywords, 'keyword', " ", true);
-                        }
-
-
-                    }
-                    $authors_elem = XMLCustomWriter::createChildWithText($doc, $article_elem, 'authors', '', true);
-                    $index = 1;
-                    foreach ($article->getData('authors') as $author) {
-                        $author_elem = XMLCustomWriter::createChildWithText($doc, $authors_elem, 'author', '', true);
-
-                        $author_FirstName = '';
-                        $author_MiddleName = '';
-                        $author_LastName = '';
-
-                        if (method_exists($author, "getLocalizedFirstName")) { # for ojs multilang by litvinovg https://github.com/litvinovg/ojs/tree/ojs-3.1.1-multilanguage
-                            $author_FirstName = $author->getLocalizedFirstName();
-                            $author_MiddleName = $author->getLocalizedMiddleName();
-                            $author_LastName = $author->getLocalizedLastName();
-                        } elseif (method_exists($author, "getLocalizedGivenName")) { # for ojs >= 3.1.2
-                            $author_FirstName = $author->getLocalizedGivenName();
-                            $author_MiddleName = '';
-                            $author_LastName = $author->getLocalizedFamilyName();
-                        } else { # for 3.0.0 < ojs < 3.1.2
-                            $author_FirstName = $author->getFirstName();
-                            $author_MiddleName = $author->getMiddleName();
-                            $author_LastName = $author->getLastName();
-                        }
-
-
-                        XMLCustomWriter::createChildWithText($doc, $author_elem, 'name', $author_FirstName, true);
-                        XMLCustomWriter::createChildWithText($doc, $author_elem, 'name2', $author_MiddleName, false);
-                        XMLCustomWriter::createChildWithText($doc, $author_elem, 'surname', $author_LastName, true);
-                        XMLCustomWriter::createChildWithText($doc, $author_elem, 'email', $author->getEmail(), false);
-                        XMLCustomWriter::createChildWithText($doc, $author_elem, 'order', $index, true);
-                        XMLCustomWriter::createChildWithText($doc, $author_elem, 'instituteAffiliation', substr($author->getLocalizedAffiliation(), 0, 250), false);
-                        XMLCustomWriter::createChildWithText($doc, $author_elem, 'role', 'AUTHOR', true);
-                        XMLCustomWriter::createChildWithText($doc, $author_elem, 'ORCID', $author->getData('orcid'), false);
-
-                        $index++;
                     }
 
-                    if (method_exists($_article, "getLocalizedCitations"))
-                        $citation_text = $_article->getLocalizedCitations();
-                    else
-                        $citation_text = $_article->getCitations();
+                    $referenceNode = $this->createNode(
+                        $document,
+                        $referencesNode,
+                        'reference'
+                    );
 
-                    if ($citation_text) {
-                        $citation_arr = explode("\n", $citation_text);
-                        $references_elem = XMLCustomWriter::createChildWithText($doc, $article_elem, 'references', '', true);
-                        $index = 1;
-                        foreach ($citation_arr as $citation) {
-                            if ($citation == "") continue;
-                            $reference_elem = XMLCustomWriter::createChildWithText($doc, $references_elem, 'reference', '', true);
-                            XMLCustomWriter::createChildWithText($doc, $reference_elem, 'unparsedContent', $citation, true);
-                            XMLCustomWriter::createChildWithText($doc, $reference_elem, 'order', $index, true);
-                            XMLCustomWriter::createChildWithText($doc, $reference_elem, 'doi', '', true);
-                            $index++;
-                        }
-                    }
-                    $num_articles++;
+                    $unparsedContentNode = $this->createNode(
+                        $document,
+                        $referenceNode,
+                        'unparsedContent',
+                        [],
+                        $citation
+                    );
 
+                    $orderNode = $this->createNode(
+                        $document,
+                        $referenceNode,
+                        'order',
+                        [],
+                        $citationsCount
+                    );
+
+                    $doiNode = $this->createNode(
+                        $document,
+                        $referenceNode,
+                        'doi'
+                    );
+
+                    $citationsCount++;
                 }
             }
-            XMLCustomWriter::setAttribute($issue_elem, 'numberOfArticles', $num_articles, false);
-            return $root;
+
+            $articlesCount++;
         }
+
+        $issueNode->setAttribute('numberOfArticles', $articlesCount);
+
+        return $document;
     }
-
-    function exportIssue(&$journal, &$issue, $outputFile = null)
-    {
-        //$this->import('JATSExportDom');
-        $doc =& XMLCustomWriter::createDocument();
-
-        $issueNode = $this->generateIssueDom($doc, $journal, $issue);
-        XMLCustomWriter::appendChild($doc, $issueNode);
-        if (!empty($outputFile)) {
-            if (($h = fopen($outputFile, 'wb')) === false) return false;
-            fwrite($h, XMLCustomWriter::getXML($doc));
-            fclose($h);
-        } else {
-
-            header("Content-Type: application/xml");
-            header("Cache-Control: private");
-            header("Content-Disposition: attachment; filename=\"copernicus-issue-" . $journal->getLocalizedAcronym() . '-' . $issue->getYear() . '-' . $issue->getNumber() . ".xml\"");
-            echo $this->formatXml($doc);
-        }
-        return true;
-    }
-
 
     function display($args, $request)
     {
         parent::display($args, $request);
-        $issueDao =& DAORegistry::getDAO('IssueDAO');
-        $journal =& $request->getJournal();
+        $templateMgr = TemplateManager::getManager($request);
+        $context = $request->getContext();
+
         switch (array_shift($args)) {
-            case 'exportIssue':
-                $issueId = array_shift($args);
-                $issue = $issueDao->getById($issueId, $journal->getId());
-                if (!$issue) $request->redirect();
-                $this->exportIssue($journal, $issue);
+            case '':
+            case 'index':
+                $templateMgr->display($this->getTemplateResource('index.tpl'));
                 break;
 
-            case 'validateIssue':
+            case 'exportIssues':
+                import('lib.pkp.classes.file.FileManager');
+                $fileManager = new FileManager();
+                $journal =& $request->getJournal();
+                $issueDao = DAORegistry::getDAO('IssueDAO');
+                $issueIds = (array) $request->getUserVar('selectedIssues');
+                foreach ($issueIds as $issueId) {
+                    $issue = $issueDao->getById($issueId, $context->getId());
+                    if ($issue) {
+                        libxml_use_internal_errors(true);
+                        $document = $this->generateIssueDom($journal, $issue);
+                        $document->formatOutput = true;
+                        $exportXml = $document->saveXML();
+                        $errors = array_filter(libxml_get_errors(), function ($a) {
+                            return $a->level == LIBXML_ERR_ERROR || $a->level == LIBXML_ERR_FATAL;
+                        });
+                        if (!empty($errors)) {
+                            $this->displayXMLValidationErrors($errors,$exportXml);
+                        }
 
-                $issueId = array_shift($args);
-                $issue = $issueDao->getById($issueId, $journal->getId());
-                if (!$issue) $request->redirect();
+                        $issueNumber = $issue->getNumber();
+                        $issueVolume = $issue->getVolume();
+                        $issueYear = $issue->getYear();
 
-                $doc = XMLCustomWriter::createDocument();
-                #var_dump($doc->saveXML());
+                        $filenamePart = $issueYear . "-" . $issueVolume . "-" . $issueNumber;
 
-                $issueNode = $this->generateIssueDom($doc, $journal, $issue);
-                XMLCustomWriter::appendChild($doc, $issueNode);
-
-                $xmlDocument = new DOMDocument('1.0', 'UTF-8');
-                $xmlDocument->preserveWhiteSpace = false;
-                $xmlDocument->formatOutput = true;
-
-                $xml = utf8_encode($doc->saveXML());
-                $xmlDocument->loadXML($xml);
-                $xmlDocument->loadXML($xmlDocument->saveXML());
-
-                // Enable user error handling
-                libxml_use_internal_errors(true);
-
-                $xmlDocument->schemaValidate($this->getPluginPath().'/ic-import.xsd');
-                $xml_lines = explode("\n", htmlentities($xmlDocument->saveXML()));
-                $xml_errors = libxml_get_errors();
-                libxml_clear_errors();
-
-                $templateMgr = TemplateManager::getManager($request);
-
-                if (method_exists($this, "getTemplateResource")) { # for ojs >= 3.1.2
-                    $templateMgr->assignByRef('xml_lines', $xml_lines);
-                    $templateMgr->assignByRef('xml_errors', $xml_errors);
-
-                    $templateMgr->display($this->getTemplateResource('validate.tpl'));
-                } else { #for ojs < 3.1.2
-                    $templateMgr->assign_by_ref('xml_lines', $xml_lines);
-                    $templateMgr->assign_by_ref('xml_errors', $xml_errors);
-
-                    $templateMgr->display($this->getTemplatePath() . '/templates/validate.tpl');
+                        $exportFileName = $this->getExportFileName($this->getExportPath(), $filenamePart, $context, '.xml');
+                        $fileManager->writeFile($exportFileName, $exportXml);
+                        $fileManager->downloadByPath($exportFileName);
+                        $fileManager->deleteByPath($exportFileName);
+                    }
                 }
-
                 break;
 
             default:
-                // Display a list of issues for export
+                $dispatcher = $request->getDispatcher();
+                $dispatcher->handle404();
 
-                $journal = $request->getJournal();
-                $issueDao =& DAORegistry::getDAO('IssueDAO');
-                $issues = $issueDao->getIssues($journal->getId(), Handler::getRangeInfo($request, 'issues'));
-
-                $templateMgr = TemplateManager::getManager($request);
-
-                if (method_exists($this, "getTemplateResource")) { # for ojs >= 3.1.2
-                    $templateMgr->assignByRef('issues', $issues);
-                    $templateMgr->display($this->getTemplateResource('issues.tpl'));
-                } else { #for ojs ojs < 3.1.2
-                    $templateMgr->assign_by_ref('issues', $issues);
-                    $templateMgr->display($this->getTemplatePath() . '/templates/issues.tpl');
-                }
         }
     }
 
@@ -371,7 +515,10 @@ class CopernicusExportPlugin extends ImportExportPlugin
      */
     function usage($scriptName)
     {
-        echo "USAGE NOT AVAILABLE.\n"
-            . "This is a sample plugin and does not actually perform a function.\n";
+        echo "USAGE NOT AVAILABLE.\n";
     }
+
+    function getPluginSettingsPrefix() {
+		return 'copernicus';
+	}
 }

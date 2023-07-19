@@ -1,0 +1,14 @@
+msgid "plugins.importexport.copernicus.displayName"
+msgstr "Vtičniz za izvoz v formatu Copernicus"
+
+msgid "plugins.importexport.copernicus.description"
+msgstr "Vtičnik implementira izvoz podatkov v XML obliki za Copernicus Citation Index."
+
+msgid "plugins.importexport.copernicus.selectIssue.short"
+msgstr "Izberi številko"
+
+msgid "plugins.importexport.copernicus.selectIssue.long"
+msgstr "Izberi številko za izvoz."
+
+msgid "plugins.importexport.copernicus.validate"
+msgstr "Overiť súbor"

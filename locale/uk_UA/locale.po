@@ -1,0 +1,14 @@
+msgid "plugins.importexport.copernicus.selectIssue.short"
+msgstr "Оберіть випуск"
+
+msgid "plugins.importexport.copernicus.selectIssue.long"
+msgstr "Оберіть випуск для експорту."
+
+msgid "plugins.importexport.copernicus.displayName"
+msgstr "Copernicus Export Plugin"
+
+msgid "plugins.importexport.copernicus.description"
+msgstr "Експорт метаданих до Copernicus Citation Index."
+
+msgid "plugins.importexport.copernicus.validate"
+msgstr "Перевірити файл"
